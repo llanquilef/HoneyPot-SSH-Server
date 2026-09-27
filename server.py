@@ -10,65 +10,23 @@ from paramiko.common import (AUTH_FAILED,
                              OPEN_SUCCEEDED,
                              OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
                              )
+from logger import setup_logger
 from dotenv import load_dotenv
 
 load_dotenv()
-
-HOST = "127.0.0.1"
-PORT = 10000
-event = threading.Event()
-HOSTKEY = paramiko.RSAKey.generate(bits=3072)
-message = "It SAUL GOOOOOD MAN"
-
-
-class ValidatePassword():
-    """ Password Validator """
-    def __init__(self, password: str):
-        self.password = password
-
-    def is_upper(self):
-        """ Validates if a password has upper case """
-        for c in self.password:
-            is_upper = [c for c in self.password.isupper()]
-            if is_upper:
-                print(f"Password has upper case: {message}")
-            else:
-                print("Password must have upper case")
-
-    def is_lower(self):
-        """ Validates if a password has lower case """
-        for c in self.password:
-            is_lower = [c for c in self.password.lower()]
-            if is_lower:
-                print(f"Password has lower case: {message}")
-            else:
-                print("Password must have lower case")
-
-    def has_symbols(self):
-        """ Validates if a password has symbols"""
-        for c in self.password:
-            if r'[^\w\s]' in c:
-                print(f"Password has symbols: {message}")
-            else:
-                print("Password must have symbols")
-
-    def has_digits(self):
-        """ Validates if a password has digits """
-        for c in self.password():
-            has_digits = [c for c in self.password.isdigit()]
-            if has_digits:
-                print("Password has digits")
-            else:
-                print("Password need at least 1 digit")
 
 
 class ServerParamiko(paramiko.ServerInterface):
     """ SERVER PARAMIKO """
     def __init__(self):
-        pass
+        self.allowed_method = 'password'
+        self.channel = None
+        self.success_message = AUTH_SUCCESSFUL
+        self.failed_operation_message = AUTH_FAILED
+        self.logger = setup_logger()
 
-    def get_allowed_auths(self, username):
-        return super().get_allowed_auths(username)
+    def get_allowed_auths(self, username: str):
+        return self.allowed_method
 
     def check_auth_password(self, username: str, password: str):
         """
@@ -85,8 +43,8 @@ class ServerParamiko(paramiko.ServerInterface):
         # except Exception as e:
         #     print(e)
         if username == os.getenv('username') and password == os.getenv('password'):
-            return AUTH_SUCCESSFUL
-        return AUTH_FAILED
+            return self.success_message
+        return self.failed_operation_message
 
     def check_channel_request(self, kind, chanid) -> int:
         if kind == 'session':
@@ -100,54 +58,85 @@ class ServerParamiko(paramiko.ServerInterface):
         return True
 
     def check_channel_exec_request(self, channel, cmd):
-        response = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
-        channel.send(response.stdout)
-        channel.send_exit_status(255)
-        return True
+        try:
+            with open('log.txt', 'w', encoding='utf-8') as log:
+                response = subprocess.run(cmd, shell=True,
+                                          stdout=log
+                                          )
+                self.channel = channel.send(response.stdout)
+                self.channel.send_exit_status(255)
+                return True
+        except Exception as e:
+            self.logger.error(e)
 
 
 class HoneyPot():
     """ HONEYPOT CLASS """
     def __init__(self):
-        pass
+        self.host = "127.0.0.1"
+        self.port = None
+        self.conn = None
+        self.family = socket.AF_INET
+        self.type = socket.SOCK_STREAM
+        self.level = socket.SOL_SOCKET
+        self.optname = socket.SO_REUSEADDR
+        self.transport = None
+        self.event = threading.Event()
+        self.hostkey = paramiko.RSAKey.generate(bits=3057)
+        self.channel = None
+        self.recv = []
+        self.logger = setup_logger()
+
+    def transport_paramiko(self, conn, addr):
+        try:
+            self.transport = paramiko.Transport(conn)
+            self.transport.banner_timeout = 200
+            self.transport.add_server_key(self.hostkey)
+            self.transport.start_server(event=self.event,
+                                        server=ServerParamiko()
+                                        )
+            self.channel = self.transport.accept(30)
+        except SSHException:
+            self.logger.error("SSH Negotiation failed")
+
+    # def recv_data(self, conn, addr):
+    #     with conn:
+    #         print(f"Connected by {addr}")
+    #         while True:
+    #             data = conn.recv(4096)
+    #             self.recv.append(data)
+    #             if not data:
+    #                 break
 
     def listen_socket(self):
-        """ We nee first to create our socket """
-        fd_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        """ We need first to create our socket """
+        self.conn = socket.socket(self.family, self.type)
+        self.port = 20000
         val = 1
-        fd_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, val)
-        fd_socket.bind((HOST, PORT))
-        fd_socket.listen(5)
-        print(f""" [*] SSH Server Listening on: {HOST}:{PORT}""")
-        return fd_socket
-
-    def accept_connections_and_set_server(self):
-        """ FUNCTION ACCEPTS CONNECTION AND SET PARAMIKO SERVER """
+        self.conn.setsockopt(self.level, self.optname, val)
+        self.conn.bind((self.host, self.port))
+        self.conn.listen(5)
+        self.logger.info("[*] SSH Server Listening on: %s:%s", self.host, self.port)
         while True:
-            conn, addr = self.listen_socket().accept()
-            print(f"""
-                  [*] Accepting connections from:
-                  IP: {addr[0]}:{addr[1]} """)
-            # Then when we can start to accept connections and do Transport
-            try:
-                t = paramiko.Transport(conn)
-                t.banner_timeout = 200
-                t.add_server_key(HOSTKEY)
-                t.start_server(event=event, server=ServerParamiko())
-                channel = t.accept(30)
-                if channel is None:
-                    print("There is NONE request auth")
-                    exit(1)
-                channel.send(b"Now you are in!")
-            except SSHException:
-                print("SSH Negotiation failed")
+            conn, addr = self.conn.accept()
+            thread1 = threading.Thread(target=self.transport_paramiko,
+                                       args=(conn, addr)
+                                       )
+
+            thread1.start()
+            thread1.run()
+            self.logger.info("[*] Accepting connections from: IP: %s:%s", addr[0], addr[1])
 
 
 def main():
     """ INITIALIZE CLASS """
     honeypot = HoneyPot()
-    honeypot.listen_socket()
-    honeypot.accept_connections_and_set_server()
+    try:
+        honeypot.listen_socket()
+    except KeyboardInterrupt:
+        print("Keyboard interrupt maybe a CTRL+C or something else")
+    except Exception as e:
+        print(e)
 
 
 if __name__ == "__main__":
